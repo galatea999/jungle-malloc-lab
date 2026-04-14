@@ -83,15 +83,47 @@ int mm_init(void) //heap은 [padding 4Byte][Prologue header][Prologue footer][ep
     PUT((char *) p+WSIZE*3, PACK(0, 1));
     
     heap_listp = (char *)p + DSIZE; //prologue footer의 위치. 여기서부터 넣을 곳 탐색이 시작될테니
+    
+    void * result = extend_heap(CHUNKSIZE/WSIZE); //mem_sbrk를 이용하는데, brk는 항상 epilogue를 가리키고 있으므로 그 위치에서 지가 알아서 함.
+    if (result == NULL)
+    return -1;
+
+    // C에서 함수를 짤 때는 input, output의 자료형을 잘 맞춰주는게 매우 중요함.
 
     
     return 0;
 }
 
+// 힙을 확장하는 함수. 1) mm_init에서 - 처음에 초기 free 블록을 만들 때, 2) mm_malloc에서 - 힙을 뒤져봤는데 맞는 free 블록이 없을 때
+// mem_sbrk로 힙을 늘리고, 새로 생긴 공간을 free 블록으로 세팅해서 반환 
 static void * extend_heap(size_t words) //void *는 그냥 반환 타입. 새로 만든 free 블록의 주소를 반환하니 void *
 {
-    ALIGN(words)
-    void *p = mem_sbrk()
+    size_t size = ALIGN(words * WSIZE); // 지금 words 단위로 받았으므로 WSIZE를 곱해서 byte 단위로 변환
+    void *bp = mem_sbrk(size); 
+    if (bp == (void *)-1) // 실패 처리
+    return NULL;
+
+    //새로 확장된 공간에 header랑 footer를 줆으로써 free블록으로 만들어야 함.
+    //bp를 이용하면 될듯. header를 만들때는 PACK을 이용하고, PUT으로 넣음
+
+    //기존 Epilogue를 덮어 씀
+    PUT(HDRP(bp), PACK(size, 0));
+
+    //footer를 만들기
+    PUT(FTRP(bp), PACK(size, 0));
+
+    // 새로운 epilogue를 만듦. NEXT_BLKP는 힙 밖을 가리키지만, dereference를 하지만 않으면 segfault는 안 남.
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
+
+    // 여기가 좀 직관적이지는 않으나, 기존에 만든 매크로를 최대한 활용해서 계산을 한 것. 품이 남는다면 코드들을 좀 더 인간에게 직관적으로 수정해봐도 좋을듯 
+
+    return(bp)
+
+
+
+    
+
+
 }
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
