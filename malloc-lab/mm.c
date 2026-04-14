@@ -18,17 +18,22 @@
 #include "mm.h"
 #include "memlib.h"
 
+static void *mm_coalesce(void *ptr);
+void *mm_findfit(size_t size);
+void mm_place(size_t size, void *ptr);
+static void * extend_heap(size_t words);
+
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
  * provide your team information in the following struct.
  ********************************************************/
 team_t team = {
     /* Team name */
-    "ateam",
+    "Jungler",
     /* First member's full name */
-    "Harry Bovik",
+    "Jeongwhan Kim",
     /* First member's email address */
-    "bovik@cs.cmu.edu",
+    "dwin351@gmail.com",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
@@ -56,11 +61,11 @@ team_t team = {
 #define CHUNKSIZE (1<<12) //힙을 확장할 때 한번에 늘리는 크기. 1<<12는 비트연산 =  2^12 = 4KB씩 가져오게 함
 #define PACK(size, alloc) ((size) | (alloc)) //헤더에 넣을 값. allocated는 0아니면 1일 것. 그걸 OR 연산 때리면 내가 생각하는 그림이 나옴
 #define GET(p)( *(unsigned int *)p)  //p가 가리키는 주소의 값을 읽어오는 매크로. 4바이트이므로 unsigned int를 씀
-#define PUT(p, val) (*(unsigned int *)p = val) // p가 가리키는 주소에 val을 쓰는 매크로. p는 void pointer일텐데, void는 타입 정보가 없어 *(dereference)가 안됨 (몇 바이트를 써야하는지 모르기에) => unsigned int *로 캐스팅이 필요함. 
+#define PUT(p, val) (*(unsigned int *)(p) = (val)) // p가 가리키는 주소에 val을 쓰는 매크로. p는 void pointer일텐데, void는 타입 정보가 없어 *(dereference)가 안됨 (몇 바이트를 써야하는지 모르기에) => unsigned int *로 캐스팅이 필요함. 
 #define GET_SIZE(p) (GET(p) & ~0x1) //allo 제외한 비트
 #define GET_ALLOC(p) (GET(p) & 0x1) // allo만
 #define HDRP(bp) ((char *)(bp)- WSIZE) //Header Pointer의 줄임말. block pointer, 즉 payload의 시작주소를 받아 헤더의 주소를 반환하는 매크로. 1바이트 단위로 계산할 것이니 char pointer를 씀.
-#define FTRP(bp) ((char *)bp + (GET_SIZE(HDRP(bp)) - WSIZE)) //Footer Pointer를 찾는 코드. 
+#define FTRP(bp) ((char *)bp + (GET_SIZE(HDRP(bp)) - DSIZE)) //Footer Pointer를 찾는 코드. 
 #define NEXT_BLKP(bp) ((char *)bp + (GET_SIZE(HDRP(bp)))) // 다음 블록의 payload 주소를 반환 BLKP : Block Pointer. payload의 시작주소를 말함.
 #define PREV_BLKP(bp) ((char *)bp - GET_SIZE((char *)bp - DSIZE))  //이전 블록의 Payload주소를 반환
 
@@ -109,7 +114,7 @@ static void * extend_heap(size_t words) //void *는 그냥 반환 타입. 새로
     //기존 Epilogue를 덮어 씀
     PUT(HDRP(bp), PACK(size, 0));
 
-    //footer를 만들기
+    //Prologue footer를 만들기
     PUT(FTRP(bp), PACK(size, 0));
 
     // 새로운 epilogue를 만듦. NEXT_BLKP는 힙 밖을 가리키지만, dereference를 하지만 않으면 segfault는 안 남.
@@ -117,7 +122,7 @@ static void * extend_heap(size_t words) //void *는 그냥 반환 타입. 새로
 
     // 여기가 좀 직관적이지는 않으나, 기존에 만든 매크로를 최대한 활용해서 계산을 한 것. 품이 남는다면 코드들을 좀 더 인간에게 직관적으로 수정해봐도 좋을듯 
 
-    return(bp)
+    return(mm_coalesce(bp));
 
 
 
@@ -131,23 +136,164 @@ static void * extend_heap(size_t words) //void *는 그냥 반환 타입. 새로
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-        return NULL;
-    else
-    {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+/* 
+* 1. align the size
+* 2. search a free block using mm_findfit 
+* 3. if you find call mm_place
+* 4. if not, extend_heap and mm_place
+*/
+    size = ALIGN(size + DSIZE);
+    void * result = mm_findfit(size);
+    if (result == NULL) {
+        result = extend_heap(size/WSIZE);
+        mm_place(size, result);
     }
+    else {
+        mm_place(size, result);
+    }
+    return result;
+
+    
 }
 
+static void * mm_coalesce(void *ptr) //payload를 가리키고 있는 bp를 받을거임
+{
+/* Case 1 - I'm free alone 
+
+Case 2 - We're both Free
+
+Case 3 - Left thing is free
+
+Case 4 - Right thing is free
+
+*/
+
+// CASE 1
+    if (GET_ALLOC((FTRP(PREV_BLKP(ptr)))) && GET_ALLOC((HDRP(NEXT_BLKP(ptr))))) 
+    {
+        //make Header
+        PUT(HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));
+
+        //make Footer
+        PUT(FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));
+
+        return ptr;
+    }
+// CASE 2 : when both are free
+    else if (GET_ALLOC((FTRP(PREV_BLKP(ptr)))) == 0 && GET_ALLOC((HDRP(NEXT_BLKP(ptr)))) == 0) 
+    {
+
+        //양 쪽 다 맞으면 헤더는 왼쪽꺼의 헤더, 푸터는 오른쪽꺼의 푸터. 사이즈가 문제인데. GET SIZE 해서 다 더해서 처리 해야할듯 
+        //make Header
+
+        size_t newsize = GET_SIZE(HDRP(ptr))+GET_SIZE(HDRP(NEXT_BLKP(ptr)))+GET_SIZE(HDRP(PREV_BLKP(ptr)));
+        PUT(HDRP(PREV_BLKP(ptr)), PACK(newsize, 0));
+
+        //make Footer
+        PUT(FTRP(PREV_BLKP(ptr)), PACK(newsize, 0));
+
+        return PREV_BLKP(ptr);
+    }
+
+// CASE 3 : when Left is free
+    else if (GET_ALLOC((FTRP(PREV_BLKP(ptr)))) == 0 && GET_ALLOC((HDRP(NEXT_BLKP(ptr)))) == 1) 
+    {
+        size_t newsize = GET_SIZE(HDRP(ptr))+GET_SIZE(HDRP(PREV_BLKP(ptr)));
+
+        //Header를 당기고, Footer는 그대로 
+        PUT(HDRP(PREV_BLKP(ptr)), PACK(newsize, 0));
+        
+        PUT(FTRP(ptr), PACK(newsize, 0));
+
+        return PREV_BLKP(ptr);
+
+
+
+    }
+
+
+// CASE 4 : when Right is free
+    else
+    {
+        size_t newsize = GET_SIZE(HDRP(ptr))+ GET_SIZE(FTRP(NEXT_BLKP(ptr)));
+
+        //Head는 그대로, Footer는 저 멀리 
+        PUT(HDRP(ptr), PACK(newsize, 0));
+
+        PUT(FTRP(ptr), PACK(newsize, 0));
+    
+        return ptr;
+    }
+
+
+
+}
 /*
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr)
 {
+    //header와 footer를 free로 표시
+    PUT(HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));
+    PUT(FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));
+
+    //coalesce 호출
+    mm_coalesce(ptr);
 }
+
+
+//find_fit (first fit) : go round whole and fine block that is on size or above 
+void * mm_findfit (size_t size)
+{
+    void * bp = heap_listp;
+    while(GET_SIZE(HDRP(bp)) != 0)
+    //go round header and compare size 
+    {
+        if (size <= GET_SIZE(HDRP(bp)) && GET_ALLOC(HDRP(bp)) == 0) //heap_list is initally at prologue footer
+        {
+            return bp;
+        }
+        else 
+        bp = NEXT_BLKP(bp);
+
+    }
+    return NULL;
+
+}
+
+/*
+ * place : imprint 'allocated' to free block, and if space is too big, split it. 
+
+ You need to focus on what is input and output when you deal with function.
+
+*/
+
+void mm_place(size_t size, void * ptr)
+{
+    
+    size_t newsize = GET_SIZE(HDRP(ptr)) - size;
+    // if space is enough, split it. standard is DSIZE * 2 (16byte)
+    if (newsize >= 16){
+        
+        //make Header and footer for the block we will use
+        PUT(HDRP(ptr), PACK(size, 1));
+        PUT(FTRP(ptr), PACK(size, 1));
+
+        // make Header and footer for splited block
+        PUT(HDRP(NEXT_BLKP(ptr)), PACK(newsize, 0));
+        PUT(FTRP(NEXT_BLKP(ptr)), PACK(newsize, 0));
+
+
+    }
+    // change status to allocated (header and footer)
+    else {
+    PUT(HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 1));
+    PUT(FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 1));
+
+    
+    }
+} 
+
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
